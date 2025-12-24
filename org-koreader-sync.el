@@ -8,6 +8,12 @@
   "Settings for importing KOReader annotations to Org-mode."
   :group 'org)
 
+;;; TODO: issues
+;; - when adding annotations, we look inside entire buffer (instead of just inside
+;;   target-headline) for matching book entries (this breaks e.g. with test.org)
+;; - when looking for matching book entries, we don't consider user's
+;;   book-template changing the format of the heading
+
 ;;; --- Custom Variables ---
 (defcustom org-koreader-sync-library-folder "~/lib/books"
   "Path to library that is (recursively) searched for *.sdr folders."
@@ -91,12 +97,19 @@ If nil, books are created at the top level of the file."
 :book-props (alist of title, authors, status, filepath)
 :annotations (list of alists for each annotation)."
   (with-temp-buffer
+    ;; 1. Setup Syntax Table
+    ;; Create a temporary syntax table to treat { and } as matching parentheses
+    ;; so `forward-list` works correctly for Lua tables.
+    (set-syntax-table (make-syntax-table))
+    (modify-syntax-entry ?\{ "(}")
+    (modify-syntax-entry ?\} "){")
+    
     (insert-file-contents filepath)
     (let ((content (buffer-string))
           (book-props nil)
           (annotations nil))
 
-      ;; 1. Parse Book Stats
+      ;; 2. Parse Book Stats
       (let* ((orig-path (org-koreader--extract-lua-field content "doc_path"))
              (fixed-path (if (and org-koreader-sync-filepath-replacement-string
                                   (string-prefix-p (car org-koreader-sync-filepath-replacement-string) orig-path))
@@ -111,25 +124,35 @@ If nil, books are created at the top level of the file."
                 (status . ,(org-koreader--extract-lua-field content "status"))
                 (filepath . ,fixed-path))))
 
-      ;; 2. Parse Annotations
+      ;; 3. Parse Annotations
       (goto-char (point-min))
+      ;; Search for start of annotation table: [1] = {
       (while (re-search-forward "\\[\\([0-9]+\\)\\]\\s-*=\\s-*{" nil t)
         (let ((num (match-string 1))
-              (start (point))
-              (end (save-excursion (search-forward "}," nil t)))) ; TODO needs to find balanced } that closes [num] = {
-          (when end
-            (let* ((block (buffer-substring-no-properties start end))
-                   (text (org-koreader--extract-lua-field block "text"))
-                   (note (org-koreader--extract-lua-field block "note"))
-                   (chap (org-koreader--extract-lua-field block "chapter"))
-                   (date (org-koreader--extract-lua-field block "datetime")))
-              (push `((number . ,num)
-                      (text . ,text)
-                      (note . ,note)
-                      (chapter . ,chap)
-                      (datetime . ,date))
-                    annotations))
-            (goto-char end))))
+              (start-content (point))) ; Point is currently immediately *after* the opening '{'
+          
+          ;; Move point back to the opening '{' so `forward-list` can see it
+          (goto-char (1- start-content))
+          
+          ;; Jump safely to the matching closing '}', ignoring braces inside strings
+          (condition-case nil
+              (forward-list 1)
+            (scan-error (goto-char (point-max)))) ; If file is truncated/corrupt, break loop
+          
+          ;; Point is now immediately *after* the closing '}'
+          (let ((end-content (1- (point))))
+            (when (> end-content start-content)
+              (let* ((block (buffer-substring-no-properties start-content end-content))
+                     (text (org-koreader--extract-lua-field block "text"))
+                     (note (org-koreader--extract-lua-field block "note"))
+                     (chap (org-koreader--extract-lua-field block "chapter"))
+                     (date (org-koreader--extract-lua-field block "datetime")))
+                (push `((number . ,num)
+                        (text . ,text)
+                        (note . ,note)
+                        (chapter . ,chap)
+                        (datetime . ,date))
+                      annotations))))))
       
       (list :book-props book-props
             :annotations (nreverse annotations)))))
