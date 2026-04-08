@@ -8,12 +8,6 @@
   "Settings for importing KOReader annotations to Org-mode."
   :group 'org)
 
-;;; TODO: issues
-;; - when adding annotations, we look inside entire buffer (instead of just inside
-;;   target-headline) for matching book entries (this breaks e.g. with test.org)
-;; - when looking for matching book entries, we don't consider user's
-;;   book-template changing the format of the heading
-
 ;;; --- Custom Variables ---
 (defcustom org-koreader-sync-library-folder "~/lib/books"
   "Path to library that is (recursively) searched for *.sdr folders."
@@ -61,7 +55,8 @@ If nil, books are created at the top level of the file."
 :KO_PATH:   %(org-koreader--get-book-prop 'filepath)
 :END:
 "
-  "Template for creating a new Book entry."
+  "Template for creating a new Book entry.
+The template must include a KO_PATH property for book matching to work."
   :type 'string
   :group 'org-koreader-sync)
 
@@ -173,50 +168,73 @@ If nil, books are created at the top level of the file."
     (if mapped (cdr mapped) "")))
 
 ;;; --- Capture Targeting ---
-(defun org-koreader--find-book-entry ()
-  "Target function for org-capture.
-Finds the headline in `org-koreader-sync-book-target-file` matching
-the current book title. Moves point there."
-  (let ((title (org-koreader--get-book-prop 'title))
-        (target-file (expand-file-name org-koreader-sync-book-target-file)))
-    (unless title (error "No book title found in context"))
-    (find-file target-file)
+(defun org-koreader--narrow-to-target-headline ()
+  "Narrow the current buffer to the subtree under `org-koreader-sync-book-target-headline'.
+If the variable is nil, do nothing (whole file is the scope)."
+  (when org-koreader-sync-book-target-headline
     (goto-char (point-min))
     (let ((found nil))
       (org-map-entries
        (lambda ()
-         (when (string= (org-get-heading t t t t) title)
+         (when (string= (org-get-heading t t t t) org-koreader-sync-book-target-headline)
            (setq found (point))))
        nil 'file)
       (if found
-          (goto-char found)
-        (error "Book entry '%s' not found for annotation capture" title)))))
+          (progn
+            (goto-char found)
+            (let ((end (save-excursion (org-end-of-subtree t) (point))))
+              (narrow-to-region found end)))
+        (error "Target headline '%s' not found" org-koreader-sync-book-target-headline)))))
 
-(defun org-koreader--exists-p (title &optional annotation-timestamp)
+(defun org-koreader--find-book-entry ()
+  "Target function for org-capture.
+Finds the headline in `org-koreader-sync-book-target-file` matching
+the current book's KO_PATH. Moves point there."
+  (let ((ko-path (org-koreader--get-book-prop 'filepath))
+        (target-file (expand-file-name org-koreader-sync-book-target-file)))
+    (unless ko-path (error "No book filepath found in context"))
+    (find-file target-file)
+    (let ((found nil))
+      (save-restriction
+        (org-koreader--narrow-to-target-headline)
+        (org-map-entries
+         (lambda ()
+           (let ((props (org-entry-properties)))
+             (when (string= (cdr (assoc "KO_PATH" props)) ko-path)
+               (setq found (point)))))
+         nil 'file))
+      (if found
+          (goto-char found)
+        (error "Book entry with KO_PATH '%s' not found for annotation capture" ko-path)))))
+
+(defun org-koreader--exists-p (ko-path &optional annotation-timestamp)
   "Check if an entry exists in the target file.
-If ANNOTATION-TIMESTAMP is nil, looks for a Book Headline with TITLE.
-If ANNOTATION-TIMESTAMP is set, looks for that Property *inside* the Book subtree."
+If ANNOTATION-TIMESTAMP is nil, looks for a Book entry with KO_PATH property.
+If ANNOTATION-TIMESTAMP is set, looks for that CREATED property *inside* the Book subtree."
   (let ((target-file (expand-file-name org-koreader-sync-book-target-file))
         (exists nil))
     (if (file-exists-p target-file)
         (with-current-buffer (find-file-noselect target-file)
           (save-excursion
-            (org-map-entries
-             (lambda ()
-               (when (string= (org-get-heading t t t t) title)
-                 (if (not annotation-timestamp)
-                     (setq exists t)
-                   (let ((limit (save-excursion (org-end-of-subtree) (point))))
-                     (save-restriction
-                       (narrow-to-region (point) limit)
-                       (org-map-entries
-                        (lambda ()
-                          (let ((props (org-entry-properties)))
-                            (when (string= (cdr (assoc "CREATED" props)) annotation-timestamp)
-                              (message "annot with ts %s in %s already exists" annotation-timestamp target-file)
-                              (setq exists t))))
-                        nil 'file))))))
-             nil 'file)))
+            (save-restriction
+              (org-koreader--narrow-to-target-headline)
+              (org-map-entries
+               (lambda ()
+                 (let ((props (org-entry-properties)))
+                   (when (string= (cdr (assoc "KO_PATH" props)) ko-path)
+                     (if (not annotation-timestamp)
+                         (setq exists t)
+                       (let ((limit (save-excursion (org-end-of-subtree) (point))))
+                         (save-restriction
+                           (narrow-to-region (point) limit)
+                           (org-map-entries
+                            (lambda ()
+                              (let ((props (org-entry-properties)))
+                                (when (string= (cdr (assoc "CREATED" props)) annotation-timestamp)
+                                  (message "annot with ts %s in %s already exists" annotation-timestamp target-file)
+                                  (setq exists t))))
+                            nil 'file)))))))
+               nil 'file))))
       nil)
     exists))
 
@@ -233,14 +251,15 @@ If ANNOTATION-TIMESTAMP is set, looks for that Property *inside* the Book subtre
       (let* ((data (org-koreader--parse-metadata-file file))
              (book (plist-get data :book-props))
              (annots (plist-get data :annotations))
-             (title (cdr (assoc 'title book))))
+             (title (cdr (assoc 'title book)))
+             (ko-path (cdr (assoc 'filepath book))))
 
         (when (and title (not (string-empty-p title)))
           ;; 1. Set Context
           (setq org-koreader-context-book book)
 
           ;; 2. Sync Book
-          (unless (org-koreader--exists-p title)
+          (unless (org-koreader--exists-p ko-path)
             (message "Creating book entry: %s" title)
             (let ((org-capture-templates
                    `(("k" "KOReader Book" entry
@@ -258,7 +277,7 @@ If ANNOTATION-TIMESTAMP is set, looks for that Property *inside* the Book subtre
             (setq org-koreader-context-annotation annot)
             (let ((timestamp (cdr (assoc 'datetime annot))))
               (message "checkin for new annotation, datetime: %s" timestamp)
-              (unless (org-koreader--exists-p title timestamp)
+              (unless (org-koreader--exists-p ko-path timestamp)
                 (let ((org-capture-templates
                        `(("n" "KOReader Note" entry
                           (file+function ,org-koreader-sync-book-target-file org-koreader--find-book-entry)
