@@ -15,7 +15,8 @@
 ;; TODO, DONE, and KILLED; configure these in Org or customize the mapping.
 ;;
 ;; Books use KOReader's partial_md5_checksum, not a title or device path.
-;; KO_PATH is derived from the local adjacent .sdr directory.  The old
+;; KO_PATH is no longer stored and is removed from matched books on sync.
+;; The local filepath remains available to custom templates.  The old
 ;; org-koreader-sync-filepath-replacement-string setting is no longer used.
 ;; Back up old imports before removing/reimporting them: manually written
 ;; notes cannot be reconstructed from KOReader.  There is no automatic
@@ -454,7 +455,7 @@ KOReader.  Reject invalid dates rather than substituting the import date."
             (org-add-planning-info 'closed (substring (org-koreader--timestamp date) 1 -1)))
         (org-koreader--warn "No completion date for %s; left CLOSED unset" (alist-get 'title book))))
     (org-koreader--put "KO_MD5" (alist-get 'md5 book))
-    (org-koreader--put "KO_PATH" (alist-get 'filepath book))
+    (when (org-entry-get nil "KO_PATH") (org-entry-delete nil "KO_PATH"))
     (org-koreader--put "AUTHOR" (alist-get 'authors book) t)
     (org-koreader--put "TYPE" "book" t)
     (org-koreader--put "YEAR" (alist-get 'year book) t)
@@ -552,8 +553,6 @@ KOReader.  Reject invalid dates rather than substituting the import date."
       (when target (goto-char target) (org-narrow-to-subtree))
       (let ((existing (org-koreader--find-property "KO_MD5" (alist-get 'md5 org-koreader-context-book))))
         (if existing (goto-char existing)
-          (when (org-koreader--find-property "KO_PATH" (alist-get 'filepath org-koreader-context-book))
-            (error "KO_PATH entry has missing/different KO_MD5; resolve it before reimporting"))
           (let ((state (org-koreader--get-status)))
             (unless (or (string-empty-p state) (member state org-todo-keywords-1))
               (error "Configure Org TODO keyword %s in the destination file" state)))
